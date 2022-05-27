@@ -1,0 +1,31 @@
+# experiment
+model: regularized_svd # regularized_svd, svdpp, bayes_svdpp
+experiment_name: 27may_regsvd_emb100_beta3e5
+evaluate: True # train or evaluate
+
+# directory info
+data_path: ../data/ratings.dat
+log_dir: ../logs
+checkpoint_dir: ../checkpoints
+
+# train test split
+test_size: 0.1
+valid_size: 0.1
+test_split_random_state: 42
+valid_split_random_state: 0
+
+# training
+num_users: 6040  #movielens 1m
+num_items: 3952  #movielens 1m
+epochs: 100
+batch_size: 64
+learning_rate: 0.001
+embedding_dim: 100
+beta: 0.00003  # weight decay coef
+
+
+
+
+
+
+
