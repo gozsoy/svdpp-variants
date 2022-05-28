@@ -1,57 +1,50 @@
 import os
 import yaml
-import logging
 import argparse
-
-import pandas as pd
 import numpy as np
 
 import torch
-from torch.utils.data import DataLoader
-import torch.optim as optim
 import torch.nn as nn
+import torch.optim as optim
+from torch.utils.tensorboard import SummaryWriter
 
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_squared_error
-
-from model import RegularizedSVD
-from dataset import CF_Dataset
-
-# performance metric
-rmse = lambda y_true,y_pred: np.sqrt(mean_squared_error(y_true, y_pred))
+from utils import get_model, get_dataloader, rmse, get_logger, load_data
 
 
-def train(cfg, train_df, valid_df, global_mean):
+def train(cfg, train_df, valid_df, global_mean, user_rated_items_df):
 
-    train_dataset = CF_Dataset(train_df)
-    valid_dataset = CF_Dataset(valid_df)
+    train_dataloader = get_dataloader(cfg, train_df, user_rated_items_df)
+    valid_dataloader = get_dataloader(cfg, valid_df, user_rated_items_df)
+
+    net = get_model(cfg, global_mean).to(device)
     
-    train_dataloader = DataLoader(dataset=train_dataset,batch_size=cfg['batch_size'],shuffle=True)
-    valid_dataloader = DataLoader(dataset=valid_dataset,batch_size=cfg['batch_size'])
-
-    model = RegularizedSVD(num_users=cfg['num_users'], num_items=cfg['num_items'], global_mean=global_mean, embedding_dim=cfg['embedding_dim']).to(device)
-
-    optimizer = optim.Adam(model.parameters(), lr=cfg['learning_rate'])
     loss_fn = nn.MSELoss()
+    optimizer = optim.Adam(net.parameters(), lr=cfg['learning_rate'])
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer,
+                                                     mode='min', verbose=True)
 
+    train_writer = SummaryWriter(log_dir=os.path.join(
+        cfg['log_dir'], cfg['experiment_name'], 'train'))
+    valid_writer = SummaryWriter(log_dir=os.path.join(
+        cfg['log_dir'], cfg['experiment_name'], 'validation'))
     lowest_val_rmse = float('inf')
 
     # zero the parameters' gradients
     optimizer.zero_grad()
-
 
     for epoch in range(cfg['epochs']):  # loop over dataset
 
         logger.info(f'epoch: {epoch+1} / {cfg["epochs"]}')
 
         # training
-        model.train()
+        net.train()
         
-        batch_train_loss_array=[]
-        batch_train_rmse_array=[]
-        batch_train_reg_loss_array=[] # temporary
-
-        for batch_data in train_dataloader: # loop over train batches
+        batch_train_total_loss_array = []
+        batch_train_reg_loss_array = []
+        batch_train_mse_loss_array = []
+        batch_train_rmse_array = []
+        
+        for batch_data in train_dataloader:  # loop over train batches
             
             x, y_true = batch_data[0], batch_data[1]
             y_true = y_true.to(torch.float32)
@@ -59,14 +52,14 @@ def train(cfg, train_df, valid_df, global_mean):
             optimizer.zero_grad()
 
             # forward pass
-            y_pred = model(x)
+            y_pred = net(x)
 
             # compute loss
-            mse_loss = loss_fn(y_true.to(device),y_pred)
+            mse_loss = loss_fn(y_true.to(device), y_pred)
 
             reg_loss = 0
-            for param in model.parameters():
-                reg_loss += torch.norm(param,'fro')**2
+            for param in net.parameters():
+                reg_loss += torch.norm(param, 'fro')**2
             
             loss = mse_loss + cfg['beta'] * reg_loss.to(device)
 
@@ -77,85 +70,108 @@ def train(cfg, train_df, valid_df, global_mean):
             optimizer.step()
                 
             # save batch metrics
-            batch_train_loss_array.append(mse_loss.detach().cpu().item())
+            batch_train_mse_loss_array.append(mse_loss.detach().cpu().item())
+            batch_train_reg_loss_array.append(
+                (cfg['beta'] * reg_loss).detach().item())
+            batch_train_total_loss_array.append(loss.detach().cpu().item())
             batch_train_rmse_array.append(rmse(y_true, y_pred.detach().cpu()))
-            batch_train_reg_loss_array.append(reg_loss.detach().cpu().item()) # temporary
-
+            
         # validation
-        model.eval()
+        net.eval()
         with torch.no_grad():
 
-            batch_valid_rmse_array=[]
+            batch_valid_rmse_array = []
             
-            for valid_batch_data in valid_dataloader: # loop over valid batches
+            for valid_batch_data in valid_dataloader:  # loop over valid batch
                 
-                valid_x, valid_y_true = valid_batch_data[0], valid_batch_data[1]
+                valid_x = valid_batch_data[0]
+                valid_y_true = valid_batch_data[1]
                 valid_y_true = valid_y_true.to(torch.float32)
 
                 # forward pass
-                valid_y_pred = model(valid_x)
+                valid_y_pred = net(valid_x)
 
                 # save batch metrics
-                batch_valid_rmse_array.append(rmse(valid_y_true, valid_y_pred.detach().cpu()))
+                batch_valid_rmse_array.append(
+                    rmse(valid_y_true, valid_y_pred.detach().cpu()))
 
-
-        # display metrics at end of epoch
-        epoch_train_loss, epoch_train_rmse = np.mean(batch_train_loss_array), np.mean(batch_train_rmse_array)
+        # record metrics at end of epoch
+        epoch_train_loss = np.mean(batch_train_total_loss_array)
+        epoch_train_rmse = np.mean(batch_train_rmse_array)
+        train_mse_loss = np.mean(batch_train_mse_loss_array)
+        train_reg_loss = np.mean(batch_train_reg_loss_array)
         epoch_val_rmse = np.mean(batch_valid_rmse_array)
 
-        logger.info(f'epoch: {epoch+1} / {cfg["epochs"]}, train_loss: {epoch_train_loss:.4f}, train_rmse: {epoch_train_rmse:.4f}, val_rmse: {epoch_val_rmse:.4f}\n')
+        logger.info(f'epoch: {epoch+1} / {cfg["epochs"]}, '
+                    f'train_total_loss: {epoch_train_loss:.4f}, '
+                    f'train_mse_loss: {train_mse_loss:.4f}, '
+                    f'train_reg_loss: {train_reg_loss:.4f}, '
+                    f'train_rmse: {epoch_train_rmse:.4f}, '
+                    f'val_rmse: {epoch_val_rmse:.4f}\n')
+        train_writer.add_scalar('epoch_loss', epoch_train_loss, epoch)
+        train_writer.add_scalar('epoch_mse_loss', train_mse_loss, epoch)
+        train_writer.add_scalar('epoch_reg_loss', train_reg_loss, epoch)
+        train_writer.add_scalar('epoch_rmse', epoch_train_rmse, epoch)
+        valid_writer.add_scalar('epoch_rmse', epoch_val_rmse, epoch)
 
         if lowest_val_rmse > epoch_val_rmse:
             lowest_val_rmse = epoch_val_rmse
 
             save_dict = {'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'loss': epoch_train_loss}
-            torch.save(save_dict, os.path.join(cfg['checkpoint_dir'],cfg['experiment_name']+'_best.pt'))
+                         'model_state_dict': net.state_dict(),
+                         'optimizer_state_dict': optimizer.state_dict(),
+                         'loss': epoch_train_loss}
+            torch.save(save_dict, os.path.join(
+                cfg['checkpoint_dir'], cfg['experiment_name']+'_best.pt'))
+
+        # val_rmse regulates learning rate
+        scheduler.step(epoch_val_rmse)
 
     return
 
 
 # estimating test set performance
-def evaluate(cfg, test_df, global_mean):
-    test_dataset = CF_Dataset(test_df)
-    test_dataloader = torch.utils.data.DataLoader(dataset=test_dataset,batch_size=cfg['batch_size'])
+def evaluate(cfg, test_df, global_mean, user_rated_items_df):
 
-    model = RegularizedSVD(num_users=cfg['num_users'], num_items=cfg['num_items'], global_mean=global_mean, embedding_dim=cfg['embedding_dim']).to(device)
+    test_dataloader = get_dataloader(cfg, test_df, user_rated_items_df)
 
-    checkpoint = torch.load(os.path.join(cfg['checkpoint_dir'],cfg['experiment_name']+'_best.pt'),map_location=device)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    net = get_model(cfg, global_mean).to(device)
+
+    checkpoint = torch.load(os.path.join(
+        cfg['checkpoint_dir'], cfg['experiment_name']+'_best.pt'), 
+        map_location=device)
+    net.load_state_dict(checkpoint['model_state_dict'])
     
-    model.eval()
+    net.eval()
     with torch.no_grad():
 
-        batch_test_rmse_array=[]
+        batch_test_rmse_array = []
         
-        for test_batch_data in test_dataloader: # loop over test batches
+        for test_batch_data in test_dataloader:  # loop over test batches
             
-            test_x, test_y_true = test_batch_data[0], test_batch_data[1]
+            test_x = test_batch_data[0]
+            test_y_true = test_batch_data[1]
             test_y_true = test_y_true.to(torch.float32)
 
             # forward pass
-            test_y_pred = model(test_x)
+            test_y_pred = net(test_x)
 
             # save batch metrics
-            batch_test_rmse_array.append(rmse(test_y_true, test_y_pred.detach().cpu()))
-
+            batch_test_rmse_array.append(
+                rmse(test_y_true, test_y_pred.detach().cpu()))
 
     # display metrics
     epoch_test_rmse = np.mean(batch_test_rmse_array)
-    logger.info(f'------------')
+    logger.info('------------')
     logger.info(f'TEST RESULTS (RMSE): {epoch_test_rmse:.4f}')
-    logger.info(f'------------')
+    logger.info('------------')
 
     return
 
 
 if __name__ == '__main__':
 
-    # load settings from config file
+    # parse config file
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, help="Path to a config file.")
 
@@ -165,13 +181,7 @@ if __name__ == '__main__':
         cfg = yaml.safe_load(f)
 
     # create logger
-    logger = logging.getLogger(cfg['experiment_name']+cfg['model'])
-    logger.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(asctime)s  - %(message)s','%d-%m-%Y %H:%M')
-    file_handler = logging.FileHandler(os.path.join(cfg['log_dir'],cfg['model'],cfg['experiment_name']))
-    file_handler.setLevel(logging.INFO)
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
+    logger = get_logger(cfg)
 
     # print settings
     logger.info(f'cfg: {cfg}')
@@ -180,20 +190,16 @@ if __name__ == '__main__':
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     logger.info(f'Using device: {device}')
 
+    # load movielens 1M dataset
+    train_df, valid_df, test_df, \
+        global_mean, user_rated_items_df = load_data(cfg)
 
-    # read MovieLens 1M dataset
-    ratings_df = pd.read_csv(cfg['data_path'],sep="::",header=None)
-
-    # rename columns
-    ratings_df = ratings_df[[0,1,2]].rename(columns={0:'user_id',1:'movie_id',2:'rating'})
-
-    # split into train, valid and test sets
-    train_valid_df, test_df = train_test_split(ratings_df, test_size=cfg['test_size'], random_state=cfg['test_split_random_state'])
-    train_df, valid_df = train_test_split(train_valid_df, test_size=cfg['valid_size'], random_state=cfg['valid_split_random_state'])
-
-    global_mean = np.mean(train_df.rating.values)
-
-    if cfg['evaluate']:
-        evaluate(cfg, test_df, global_mean)
+    if cfg['mode'] == 'train':
+        train(cfg, train_df, valid_df, global_mean, user_rated_items_df)
+    elif cfg['mode'] == 'evaluate':
+        evaluate(cfg, test_df, global_mean, user_rated_items_df)
+    elif cfg['mode'] == 'both':
+        train(cfg, train_df, valid_df, global_mean, user_rated_items_df)
+        evaluate(cfg, test_df, global_mean, user_rated_items_df)
     else:
-        train(cfg, train_df, valid_df, global_mean)
+        raise NotImplementedError()
