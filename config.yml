@@ -1,7 +1,7 @@
 # experiment
-model: regularized_svd # regularized_svd, svdpp, bayes_svdpp
-experiment_name: 27may_regsvd_emb100_beta5e5
-mode: 'evaluate' # train or evaluate or both
+model: bayesian_svdpp # regularized_svd, svdpp, bayesian_svdpp
+experiment_name: 28may_bayessvdpp_batch256_emb30
+mode: 'both' # train or evaluate or both
 
 # directory info
 data_path: ../data/ratings.dat
@@ -18,10 +18,11 @@ valid_split_random_state: 0
 num_users: 6040  #movielens 1m
 num_items: 3952  #movielens 1m
 epochs: 100
-batch_size: 128
+batch_size: 256
 learning_rate: 0.001
-embedding_dim: 100
-beta: 0.00005  # weight decay coef
+embedding_dim: 30
+beta: 0.00003  # weight decay coef
+kl_coef: 0.000001  # only relevant for bayesian_svdpp
 
 
 

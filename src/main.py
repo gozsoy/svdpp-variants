@@ -40,7 +40,7 @@ def train(cfg, train_df, valid_df, global_mean, user_rated_items_df):
         net.train()
         
         batch_train_total_loss_array = []
-        batch_train_reg_loss_array = []
+        batch_train_reg_loss_array = []  # either l2-reg or kl-reg
         batch_train_mse_loss_array = []
         batch_train_rmse_array = []
         
@@ -58,10 +58,14 @@ def train(cfg, train_df, valid_df, global_mean, user_rated_items_df):
             mse_loss = loss_fn(y_true.to(device), y_pred)
 
             reg_loss = 0
-            for param in net.parameters():
-                reg_loss += torch.norm(param, 'fro')**2
-            
-            loss = mse_loss + cfg['beta'] * reg_loss.to(device)
+            if cfg['model'] == 'regularized_svd' or cfg['model'] == 'svdpp':
+                for param in net.parameters():
+                    reg_loss += torch.norm(param, 'fro')**2
+                reg_loss *= cfg['beta']
+            else:
+                reg_loss = net.compute_total_kl_loss().cpu() * cfg['kl_coef']
+
+            loss = mse_loss + reg_loss.to(device)
 
             # backpropagation
             loss.backward()
@@ -71,8 +75,7 @@ def train(cfg, train_df, valid_df, global_mean, user_rated_items_df):
                 
             # save batch metrics
             batch_train_mse_loss_array.append(mse_loss.detach().cpu().item())
-            batch_train_reg_loss_array.append(
-                (cfg['beta'] * reg_loss).detach().item())
+            batch_train_reg_loss_array.append(reg_loss.detach().item())
             batch_train_total_loss_array.append(loss.detach().cpu().item())
             batch_train_rmse_array.append(rmse(y_true, y_pred.detach().cpu()))
             

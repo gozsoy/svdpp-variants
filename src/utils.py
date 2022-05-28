@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error
 
-from model import RegularizedSVD, SVDPP
+from model import RegularizedSVD, SVDPP, Bayesian_SVDPP
 from dataset import SVD_Dataset, SVDPP_Dataset
 
 
@@ -72,7 +72,9 @@ def get_model(cfg, global_mean):
             num_users=cfg['num_users'], num_items=cfg['num_items'],
             global_mean=global_mean, embedding_dim=cfg['embedding_dim'])
     elif cfg['model'] == 'bayesian_svdpp':
-        raise NotImplementedError()
+        return Bayesian_SVDPP(
+            num_users=cfg['num_users'], num_items=cfg['num_items'],
+            global_mean=global_mean, embedding_dim=cfg['embedding_dim'])
     else:
         raise NotImplementedError()
 
@@ -108,7 +110,7 @@ def get_dataloader(cfg, df, user_rated_items_df):
             rates_items_tensor = torch.tensor(list(
                 map(lambda row: row[2], batch)), dtype=torch.int64)
             rated_count = torch.tensor(list(
-                map(lambda row: row[3], batch)), dtype=torch.int64)
+                map(lambda row: row[3], batch)), dtype=torch.float32)
             r_tensor = torch.tensor(list(
                 map(lambda row: row[4], batch)), dtype=torch.int64)
             return (u_id_tensor, m_id_tensor,
